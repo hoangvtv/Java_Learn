@@ -1,0 +1,9 @@
+spring:
+  name: dev
+
+profile:
+  name: dev
+  age: 25
+
+server:
+  port: 8082

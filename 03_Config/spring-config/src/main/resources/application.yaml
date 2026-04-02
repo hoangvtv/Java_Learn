@@ -1,40 +1,6 @@
-## YAML  viết theo dạng TREE, sử dụng KEY và VALUE, có thể viết theo dạng LIST, MAP, Object
-## Nếu vừa có yaml vừa có properties thì properties sẽ được ưu tiên hơn
 spring:
-  application:
-    name: spring-config
-  server:
-    port: 8081
-
-profile:
-  name: dev_yaml
-  age: 21
-
-database:
-  url: jdbc:mysql://localhost:3306/mydb
-  username: root
-  password: password
-
-## YAML có thể viết theo dạng List
-list:
-  - item1
-  - item2
-  - item3
-
-## YAML có thể viết theo dạng Map
-map:
-  key1: value1
-  key2: value2
-  key3: value3
-
-## YAML có thể viết theo dạng Object
-object:
-  key1: value1
-  key2: value2
-  key3: value3
-
-## YAML có thể viết theo dạng Object lồng nhau
-object2:
-  key1:
-    key2:
-      key3: value3
+  name: local
+  profiles:
+    active: test
+server:
+  port: 8081

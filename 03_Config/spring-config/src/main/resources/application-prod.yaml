@@ -1,0 +1,9 @@
+spring:
+  name: prod
+
+profile:
+  name: prod
+  age: 30
+
+server:
+  port: 8084
