@@ -1,0 +1,20 @@
+spring:
+ application:
+  name: spring_basic
+ datasource:
+  url: jdbc:mysql://localhost:3306/spring_basic
+  username: root
+  password: "13022001"
+  driver-class-name: com.mysql.cj.jdbc.Driver
+ jpa:
+  hibernate:
+   ddl-auto: create
+  show-sql: true
+  properties:
+   hibernate:
+    dialect: org.hibernate.dialect.MySQLDialect
+    format_sql: true
+    use_sql_comments: true
+    generate_statistics: true
+    highlight_sql: true
+    show_sql: true
