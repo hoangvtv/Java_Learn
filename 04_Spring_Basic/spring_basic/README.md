@@ -19,6 +19,9 @@
   - [4.5 Criteria API / Specification](#45-criteria-api--specification)
   - [4.6 QueryDSL](#46-querydsl)
   - [4.7 `@Modifying` và `@Transactional`](#47-modifying-và-transactional)
+- [5. Quan hệ Entity — Cascade, JoinColumn, Relationships](#5-quan-hệ-entity--cascade-joincolumn-relationships)
+  - [5.4 `orphanRemoval` — xóa con khi bị gỡ khỏi cha](#54-orphanremoval--xóa-con-khi-bị-gỡ-khỏi-cha)
+  - [4.7 `@Modifying` và `@Transactional`](#47-modifying-và-transactional)
 
 ---
 
@@ -984,3 +987,305 @@ public interface UserRepository extends
 }
 ```
 
+---
+
+## 5. Quan hệ Entity — Cascade, JoinColumn, Relationships
+
+### 5.1 Cascade — Khi nào thao tác được lan truyền?
+
+**Cascade** quyết định khi thực hiện thao tác (persist, merge, remove, refresh, detach) trên entity cha thì entity con có bị ảnh hưởng không.
+
+```java
+@ManyToOne(cascade = CascadeType.ALL)
+@JoinColumn(name = "userId", nullable = false)
+private UserEntity user;
+```
+
+#### Các loại CascadeType
+
+| CascadeType       | Thao tác lan truyền                                         | Ví dụ thực tế                                     |
+|-------------------|------------------------------------------------------------|----------------------------------------------------|
+| `ALL`             | Tất cả các loại bên dưới                                    | Cha có gì, con đều theo                           |
+| `PERSIST`         | Khi `save()` cha → con cũng được `save()` tự động           | Tạo Order → OrderItem tự tạo theo                  |
+| `MERGE`           | Khi `merge()` cha → con cũng được `merge()`                | Cập nhật Order → OrderItem liên quan được merge   |
+| `REMOVE`          | Khi xóa cha → con cũng bị xóa                               | Xóa User → Comment của user cũng bị xóa          |
+| `REFRESH`         | Khi `refresh()` cha → con cũng được `refresh()`            | Làm mới parent → làm mới child từ DB              |
+| `DETACH`          | Khi `detach()` cha → con cũng bị `detach()`                | Tách cha khỏi persistence context → con cũng tách |
+
+```java
+// Ví dụ: CascadeType.ALL — tất cả thao tác lan truyền
+@OneToMany(cascade = CascadeType.ALL, mappedBy = "user")
+private List<CommentEntity> comments;
+```
+
+```java
+// Ví dụ: chỉ định rõ — vừa tạo vừa xóa theo, không cascade update
+@OneToMany(cascade = {CascadeType.PERSIST, CascadeType.REMOVE}, mappedBy = "user")
+private List<CommentEntity> comments;
+```
+
+#### Ví dụ thực tế — Order và OrderItem
+
+```java
+// Entity Cha: Order
+@Entity
+public class Order {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private Double total;
+
+    // Khi save Order → OrderItem tự save
+    // Khi xóa Order → OrderItem tự xóa
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "order")
+    private List<OrderItem> items = new ArrayList<>();
+}
+```
+
+```java
+// Entity Con: OrderItem
+@Entity
+public class OrderItem {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "order_id")
+    private Order order;
+}
+```
+
+```java
+// Service — chỉ cần save cha, con tự theo
+@Transactional
+public void createOrder() {
+    Order order = new Order();
+    order.setTotal(100.0);
+
+    OrderItem item = new OrderItem();
+    item.setOrder(order);           // set cả 2 chiều!
+    order.getItems().add(item);
+
+    orderRepository.save(order);    // Chỉ cần save cha
+    // item được persist tự động nhờ CascadeType.ALL
+}
+```
+
+> ⚠️ **Cẩn thận với `CascadeType.REMOVE`:** Xóa cha → xóa hết con. Không dùng trên production nếu chưa có strategy backup. Dùng thêm `orphanRemoval = true` để xóa con khi bị remove khỏi collection.
+
+#### So sánh nhanh
+
+| CascadeType       | Tạo con theo cha | Xóa con theo cha | Merge con theo cha |
+|-------------------|-----------------|------------------|--------------------|
+| `ALL`             | ✅              | ✅               | ✅                  |
+| `PERSIST`         | ✅              | ❌               | ❌                  |
+| `REMOVE`          | ❌              | ✅               | ❌                  |
+| `MERGE`           | ❌              | ❌               | ✅                  |
+
+### 5.2 `@JoinColumn` — chỉ định cột khóa ngoại
+
+`@JoinColumn` chỉ định **cột FK** trong bảng hiện tại tham chiếu đến PK của bảng kia.
+
+```java
+@ManyToOne(cascade = CascadeType.ALL, optional = false)
+@JoinColumn(name = "userId", nullable = false)
+private UserEntity user;
+```
+
+| Thuộc tính               | Giá trị              | Ý nghĩa                                         |
+|--------------------------|----------------------|-------------------------------------------------|
+| `name`                   | `"userId"`           | Tên cột FK trong bảng hiện tại                 |
+| `referencedColumnName`   | `"id"` (mặc định)   | Tên cột PK ở bảng kia                           |
+| `nullable`               | `false`              | FK không được NULL                              |
+| `unique`                 | `false`              | FK có phải unique không (dùng cho quan hệ 1-1)  |
+| `insertable`              | `true`               | Có cho phép insert vào cột này không           |
+| `updatable`               | `true`               | Có cho phép update vào cột này không           |
+| `columnDefinition`        | —                    | Ghi đè kiểu cột SQL (tùy chỉnh)                |
+
+> **Phân biệt:** `@Column` chỉ định cột thường trong bảng hiện tại. `@JoinColumn` chỉ định cột FK tham chiếu bảng khác.
+
+### 5.3 `@ManyToOne` — quan hệ Nhiều-Một
+
+**Nghĩa:** Nhiều record ở bảng hiện tại tham chiếu đến **1 record** ở bảng kia.
+
+```
+Comment_table (nhiều comment)
+  └── FK: user_id ────→ user_entity (1 user viết nhiều comment)
+```
+
+| Annotation    | Ý nghĩa                                                    |
+|---------------|------------------------------------------------------------|
+| `@ManyToOne` | Nhiều-đối-một → Comment nhiều, User một                  |
+| `@OneToMany` | Một-đối-nhiều → User một, List<Comment> nhiều           |
+| `@OneToOne`  | Một-đối-một                                               |
+| `@ManyToMany` | Nhiều-đối-nhiều                                            |
+
+#### Thuộc tính `optional`
+
+| Giá trị             | Ý nghĩa                                      | Ràng buộc DB          |
+|---------------------|----------------------------------------------|-----------------------|
+| `optional = true` (mặc định) | FK có thể NULL — comment có thể không có user | `user_id NULL`     |
+| `optional = false`  | FK bắt buộc NOT NULL — mỗi comment phải có user | `user_id NOT NULL` |
+
+```java
+// optional = false: comment bắt buộc phải có user
+@ManyToOne(optional = false)
+@JoinColumn(name = "userId", nullable = false)
+private UserEntity user;
+```
+
+```sql
+-- Hibernate sinh ra:
+-- user_id BIGINT NOT NULL,
+-- FOREIGN KEY (user_id) REFERENCES user_entity(id)
+```
+
+### 5.4 Quan hệ 2 chiều và `mappedBy`
+
+#### Cách hoạt động
+
+```java
+// ===== Bên sở hữu FK (Owner side) — có JoinColumn = tạo cột FK =====
+@ManyToOne
+@JoinColumn(name = "userId")
+private UserEntity user;
+
+// ===== Bên không sở hữu FK (Inverse side) — dùng mappedBy, KHÔNG tạo cột FK =====
+// mappedBy = tên field bên kia tham chiếu đến mình
+@OneToMany(mappedBy = "user")
+private List<CommentEntity> comments;
+```
+
+| Bên             | Có `@JoinColumn`? | Có `mappedBy`? | Tạo cột FK? | Mục đích              |
+|-----------------|-------------------|---------------|------------|------------------------|
+| **Owner side**  | ✅ Có              | ❌ Không       | ✅ Có       | Sở hữu FK thật sự     |
+| **Inverse side**| ❌ Không           | ✅ Có          | ❌ Không    | Chỉ ngầm liên kết     |
+
+> **`mappedBy` không bao giờ tạo cột FK trong database.** FK luôn nằm ở bên có `JoinColumn` (Owner side).
+
+### 5.4 `orphanRemoval` — xóa con khi bị gỡ khỏi cha
+
+`orphanRemoval` là thuộc tính bổ sung cho `@OneToMany`, có nghĩa: **con bị xóa khỏi database khi bị remove khỏi collection của cha**.
+
+```java
+@OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+private List<CommentEntity> comments = new ArrayList<>();
+```
+
+#### So sánh `CascadeType.REMOVE` vs `orphanRemoval`
+
+| Tiêu chí         | `CascadeType.REMOVE`                        | `orphanRemoval = true`                              |
+|------------------|---------------------------------------------|----------------------------------------------------|
+| Con bị xóa khi    | Cha bị xóa                                  | Cha bị xóa **HOẶC** con bị `remove()` khỏi list  |
+| Bắt buộc cha?     | Không bắt buộc — con vẫn tồn tại khi cha xóa | Không bắt buộc                                    |
+| Trigger          | `entityRepository.delete(cha)`               | `cha.getComments().remove(comment)`                 |
+
+```java
+// Ví dụ: orphanRemoval = true
+@Transactional
+public void removeComment() {
+    UserEntity user = userRepository.findById(1L);
+
+    CommentEntity comment = user.getComments().get(0);
+    user.getComments().remove(comment);   // Xóa khỏi list
+
+    userRepository.save(user);
+    // comment bị xóa khỏi DB tự động nhờ orphanRemoval = true
+}
+```
+
+```java
+// Ví dụ: CascadeType.REMOVE (không có orphanRemoval)
+@Transactional
+public void removeComment() {
+    UserEntity user = userRepository.findById(1L);
+
+    user.getComments().remove(0);          // Chỉ xóa khỏi list
+    userRepository.save(user);
+    // ❌ Comment vẫn còn trong DB — không bị xóa
+}
+```
+
+#### Khi nào dùng?
+
+| Tình huống                          | Cấu hình                               |
+|-------------------------------------|----------------------------------------|
+| Xóa cha → xóa hết con               | `cascade = CascadeType.ALL`           |
+| Xóa cha → xóa hết con (không cascade ALL) | `cascade = CascadeType.REMOVE`      |
+| Xóa khỏi list → xóa con            | `orphanRemoval = true`                |
+| **Combo đầy đủ:**                   | `cascade = CascadeType.ALL, orphanRemoval = true` |
+
+> **Lưu ý:** `orphanRemoval = true` tự động ngầm kéo theo `CascadeType.REMOVE`. Tuy nhiên `CascadeType.REMOVE` **không** ngầm kéo theo `orphanRemoval`.
+
+#### Tóm tắt: `@OneToMany` đầy đủ
+
+```java
+@OneToMany(
+    mappedBy = "user",           // Inverse side — không tạo FK
+    cascade = CascadeType.ALL,   // Tất cả thao tác trên cha lan sang con
+    orphanRemoval = true         // Xóa con khi bị remove khỏi list
+)
+private List<CommentEntity> comments = new ArrayList<>();
+```
+
+---
+
+#### Phải set cả 2 chiều khi thêm vào collection
+
+```java
+@Transactional
+public void addComment() {
+    CommentEntity comment = new CommentEntity();
+    comment.setUser(user);                  // Bên owner — set entity
+    user.getComments().add(comment);         // Bên inverse — thêm vào list
+    commentRepository.save(comment);        // Chỉ cần save comment
+}
+```
+
+### 5.5 Bảng tổng hợp quan hệ Entity
+
+| Quan hệ        | Cột FK ở đâu? | mappedBy? | Ví dụ                      |
+|---------------|---------------|-----------|----------------------------|
+| `@ManyToOne` | Bảng con      | Không     | Comment → User            |
+| `@OneToMany` | Bảng con      | ✅ Có      | User → List<Comment>       |
+| `@OneToOne`  | 1 trong 2 bên| Có        | User → UserProfile         |
+| `@ManyToMany`| Bảng trung gian| Có       | Student ↔ Course           |
+
+### 5.6 Ví dụ đầy đủ
+
+```java
+// ===== CommentEntity.java (Owner side) =====
+@Entity
+@Table(name = "comment")
+public class CommentEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String content;
+
+    // Owner side — sở hữu FK, bắt buộc có user, cascade ALL
+    @ManyToOne(cascade = CascadeType.ALL, optional = false)
+    @JoinColumn(name = "userId", nullable = false)
+    private UserEntity user;
+}
+
+// ===== UserEntity.java (Inverse side) =====
+@Entity
+@Table(name = "user_entity")
+public class UserEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String userName;
+
+    // Inverse side — không sở hữu FK, cascade theo owner
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+    private List<CommentEntity> comments = new ArrayList<>();
+}
+```
