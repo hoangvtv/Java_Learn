@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: spring-security
+  security:
+    user:
+      password: root
+      name: root
+      roles: # multiple roles
+        - admin
+        - user
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.security: DEBUG
