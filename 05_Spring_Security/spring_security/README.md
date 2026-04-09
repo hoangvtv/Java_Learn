@@ -5,6 +5,9 @@
 1. [Sơ đồ luồng xác thực](#sơ-đồ-luồng-xác-thực-request-trong-spring-security)
 2. [Giải thích chi tiết từng thành phần](#giải-thích-chi-tiết-từng-thành-phần)
    - [1. User Request → Security Filter Chain](#1-user-request--security-filter-chain)
+     - [Bảng 16 filter và thứ tự](#sơ-đồ-luồng-request-qua-16-filter)
+     - [3 filter quan trọng nhất](#chi-tiết-3-filter-quan-trọng-nhất)
+     - [Thứ tự filter có thể thay đổi không?](#thứ-tự-filter-có-thể-thay-đổi-không)
    - [2. SecurityContextHolder](#2-securitycontextholder)
    - [3. Authentication Manager](#3-authentication-manager)
    - [4. Authentication Provider (1, 2, 3)](#4-authentication-provider-1-2-3)
@@ -19,7 +22,13 @@
    - [3. SSL Client Authentication](#3-ssl-client-authentication-x509-certificate)
    - [4. Form-based Authentication](#4-form-based-authentication)
    - [So sánh 4 phương thức](#so-sánh-4-phương-thức-xác-thực)
-6. [Bảng tổng hợp màu sắc sơ đồ](#bảng-tổng-hợp-màu-sắc-sơ-đồ)
+6. [Các cách Custom User](#các-cách-custom-user-trong-spring-security)
+   - [C1: Cấu hình trong SecurityConfig](#c1-cấu-hình-trong-securityconfig)
+   - [C2: Custom UserDetailsService](#c2-custom-userdetailsservice)
+   - [So sánh C1 vs C2](#so-sánh-c1-vs-c2)
+   - [Bonus: Mã hóa password](#bonus-mã-hóa-password-khi-lưu-vào-database)
+7. [Phân biệt `.roles()` và `.authorities()`](#phân-biệt-roles-và-authorities-trong-spring-security)
+8. [Bảng tổng hợp màu sắc sơ đồ](#bảng-tổng-hợp-màu-sắc-sơ-đồ)
 
 ---
 
@@ -95,12 +104,172 @@ User Request  ──▶  Security Filter Chain
 ```
 
 - **User Request**: Yêu cầu từ phía người dùng gửi lên server (chưa xác thực).
-- **Security Filter Chain**: Chuỗi các bộ lọc bảo mật được thực thi **theo thứ tự**. Mỗi filter đảm nhận một nhiệm vụ riêng.
-  - Một số filter phổ biến:
-    - `SecurityContextPersistenceFilter` — Lưu/khôi phục SecurityContext qua request
-    - `LogoutFilter` — Xử lý logout
-    - `UsernamePasswordAuthenticationFilter` — Thu thập thông tin đăng nhập (username/password)
-    - `FilterSecurityInterceptor` — Kiểm tra quyền truy cập cuối cùng
+- **Security Filter Chain**: Chuỗi 16 bộ lọc bảo mật được thực thi **theo thứ tự từ trên xuống dưới**. Mỗi filter đảm nhận một nhiệm vụ riêng.
+
+Dưới đây là thứ tự và chức năng của **tất cả 16 filter** trong Security Filter Chain:
+
+| # | Filter | Thứ tự | Chức năng |
+|---|---|---|---|
+| 0 | `DisableEncodeUrlFilter` | 1 | Vô hiệu hóa mã hóa URL không cần thiết. Tối ưu URL cho Spring. |
+| 1 | `WebAsyncManagerIntegrationFilter` | 2 | Tích hợp `SecurityContext` vào `WebAsyncManager` để `SecurityContext` hoạt động trong thread async. |
+| 2 | `SecurityContextHolderFilter` | 3 | **Lưu / khôi phục** `SecurityContext` cho mỗi request. Đọc `SecurityContext` từ session hoặc tạo mới rỗng. |
+| 3 | `HeaderWriterFilter` | 4 | Ghi các header bảo mật vào response: `X-Frame-Options`, `X-Content-Type-Options`, `Cache-Control`... |
+| 4 | `CsrfFilter` | 5 | Bảo vệ chống **CSRF (Cross-Site Request Forgery)**. Yêu cầu request phải có đúng CSRF token. |
+| 5 | `LogoutFilter` | 6 | Xử lý **logout**. Bắt URL `/logout` (mặc định) → xóa session, xóa `SecurityContext`, chuyển hướng. |
+| 6 | `UsernamePasswordAuthenticationFilter` | 7 | Thu thập thông tin đăng nhập (username/password) → gọi `AuthenticationManager` để xác thực. |
+| 7 | `DefaultResourcesFilter` | 8 | Cho phép truy cập tĩnh (CSS, JS, hình ảnh...) mà **không cần** xác thực. |
+| 8 | `DefaultLoginPageGeneratingFilter` | 9 | Tự động sinh **trang login** mặc định của Spring Security (khi dùng `formLogin()`). |
+| 9 | `DefaultLogoutPageGeneratingFilter` | 10 | Tự động sinh **trang logout** mặc định. |
+| 10 | `BasicAuthenticationFilter` | 11 | Xử lý **Basic Authentication** — đọc header `Authorization: Basic base64(user:pass)` → xác thực. |
+| 11 | `RequestCacheAwareFilter` | 12 | Khôi phục request ban đầu (sau khi login thành công) — user muốn truy cập `/admin` nhưng bị redirect `/login`, sau login quay lại `/admin`). |
+| 12 | `SecurityContextHolderAwareRequestFilter` | 13 | Wrapper request gốc (`HttpServletRequest`) thành `SecurityContextHolderAwareRequestWrapper` — hỗ trợ `request.isUserInRole()`, `request.getRemoteUser()`... |
+| 13 | `AnonymousAuthenticationFilter` | 14 | Gán **Authentication ẩn danh** (`ROLE_ANONYMOUS`) cho user chưa đăng nhập — đảm bảo `SecurityContext` không bao giờ null. |
+| 14 | `ExceptionTranslationFilter` | 15 | Bắt các exception liên quan đến quyền truy cập → trả về **trang lỗi 403** hoặc redirect **trang login 401**. |
+| 15 | `AuthorizationFilter` | 16 | **(Filter cuối cùng)** — Kiểm tra quyền truy cập resource: `hasRole("ADMIN")`, `hasAuthority("READ")`... → cho phép hoặc ném `AccessDeniedException`. |
+
+---
+
+### Sơ đồ luồng request qua 16 filter
+
+```
+REQUEST
+  │
+  ▼
+[0] DisableEncodeUrlFilter          ─── Tối ưu URL
+  ▼
+[1] WebAsyncManagerIntegrationFilter ─── Tích hợp async context
+  ▼
+[2] SecurityContextHolderFilter     ─── Lưu/khôi phục SecurityContext
+  ▼
+[3] HeaderWriterFilter              ─── Ghi security headers
+  ▼
+[4] CsrfFilter                       ─── Kiểm tra CSRF token
+  ▼
+[5] LogoutFilter                     ─── Xử lý logout (/logout)
+  ▼
+[6] UsernamePasswordAuthenticationFilter ─── Đăng nhập (form login)
+  ▼
+[7] DefaultResourcesFilter           ─── Cho phép tài nguyên tĩnh
+  ▼
+[8] DefaultLoginPageGeneratingFilter ─── Sinh trang login mặc định
+  ▼
+[9] DefaultLogoutPageGeneratingFilter ─── Sinh trang logout mặc định
+  ▼
+[10] BasicAuthenticationFilter       ─── Basic Auth (header)
+  ▼
+[11] RequestCacheAwareFilter         ─── Khôi phục request gốc sau login
+  ▼
+[12] SecurityContextHolderAwareRequestFilter ─── Wrapper request (isUserInRole...)
+  ▼
+[13] AnonymousAuthenticationFilter   ─── Gán anonymous role
+  ▼
+[14] ExceptionTranslationFilter      ─── Xử lý exception 403/401
+  ▼
+[15] AuthorizationFilter             ─── Kiểm tra quyền cuối cùng ⭐
+  │
+  ▼
+RESPONSE
+```
+
+---
+
+### Chi tiết 3 filter quan trọng nhất
+
+#### 1. UsernamePasswordAuthenticationFilter (#6)
+
+Filter trung tâm xử lý **form login**.
+
+```java
+// Khi user submit form login (POST /login)
+UsernamePasswordAuthenticationFilter
+    │
+    ├── Đọc username từ request param ("username")
+    ├── Đọc password từ request param ("password")
+    ├── Tạo object UsernamePasswordAuthenticationToken
+    │
+    └── Gọi AuthenticationManager.authenticate(token)
+             │
+             ├── DaoAuthenticationProvider
+             │     ├── UserDetailsService.loadUserByUsername() → lấy user từ DB
+             │     └── PasswordEncoder.matches(rawPass, encodedPass) → so sánh
+             │
+             ├── ✅ Thành công → lưu vào SecurityContext → redirect trang gốc
+             └── ❌ Thất bại  → ném AuthenticationException → redirect /login?error
+```
+
+#### 2. AuthorizationFilter (#15) — *(trước đây là FilterSecurityInterceptor)*
+
+Filter **cuối cùng và quan trọng nhất** — kiểm tra quyền truy cập resource.
+
+```java
+AuthorizationFilter
+    │
+    ├── Lấy Authentication hiện tại từ SecurityContext
+    │
+    ├── Kiểm tra: SecurityConfig đã khai báo gì cho resource này?
+    │
+    ├── hasRole("ADMIN")?    → kiểm tra authorities có "ROLE_ADMIN"?
+    ├── hasAuthority("READ")? → kiểm tra authorities có "READ"?
+    └── hasPermission()?      → kiểm tra quyền chi tiết hơn
+    │
+    ├── ✅ Pass → cho phép truy cập resource
+    └── ❌ Fail
+          │
+          ├── Đã đăng nhập → ném AccessDeniedException → ExceptionTranslationFilter → 403
+          └── Chưa đăng nhập → ném AuthenticationException → ExceptionTranslationFilter → 401 / redirect login
+```
+
+#### 3. AnonymousAuthenticationFilter (#13)
+
+Đảm bảo mọi request đều có `SecurityContext` — không bao giờ null.
+
+```java
+// Khi chưa đăng nhập, các filter sau vẫn cần đọc Authentication
+AnonymousAuthenticationFilter
+    │
+    └── Gán Authentication ẩn danh:
+        Principal = "anonymousUser"
+        Authorities = ["ROLE_ANONYMOUS"]
+```
+
+→ Nhờ vậy code bên trong có thể luôn gọi `SecurityContextHolder.getContext().getAuthentication()` mà không bị `NullPointerException`.
+
+---
+
+### Thứ tự filter có thể thay đổi không?
+
+Có. Khi cấu hình `HttpSecurity`, thứ tự filter phụ thuộc vào những gì bạn bật/tắt:
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())           // ← tắt CsrfFilter (#4)
+            .formLogin(form -> form.permitAll())    // ← bật UsernamePasswordAuthFilter + DefaultLoginPageGeneratingFilter
+            .httpBasic(basic -> {})                  // ← bật BasicAuthenticationFilter (#10)
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/public/**").permitAll()
+                .anyRequest().authenticated()
+            );
+        return http.build();
+    }
+}
+```
+
+| Tùy chọn | Filter bị ảnh hưởng |
+|---|---|
+| `csrf().disable()` | `CsrfFilter` (#4) bị tắt |
+| `formLogin()` | `UsernamePasswordAuthenticationFilter` (#6), `DefaultLoginPageGeneratingFilter` (#8) |
+| `httpBasic()` | `BasicAuthenticationFilter` (#10) |
+| `logout()` | `LogoutFilter` (#5) |
+| Không có `formLogin()` | `DefaultLoginPageGeneratingFilter` (#8) không có mặt |
+
+---
+
 - Sau khi filter chain xử lý xong, luồng rẽ hai hướng:
   1. **SecurityContextHolder** — lưu trữ context (Principal + Authorities)
   2. **Authentication Manager** — xử lý xác thực
@@ -510,6 +679,408 @@ public class SecurityConfig {
 | **User experience** | Hộp thoại trình duyệt | Hộp thoại trình duyệt | Tự động (cert) | Trang login tùy chỉnh |
 | **Cần server setup** | Không | Không | SSL Certificate | Không |
 | **Chống replay attack** | Không | Có (nhờ nonce) | Có (TLS) | Không (cần thêm) |
+
+---
+
+## Các cách Custom User trong Spring Security
+
+Có nhiều cách để khai báo và quản lý user trong Spring Security. Dưới đây là **2 cách phổ biến nhất**.
+
+---
+
+### C1: Cấu hình trong SecurityConfig
+
+Khai báo user trực tiếp bên trong class `SecurityConfig`. Phù hợp khi số lượng user ít, **ít thay đổi** (ví dụ: môi trường dev, test, demo).
+
+**Cơ chế:**
+- Dùng `UserDetailsManager` (cụ thể là `InMemoryUserDetailsManager`) để lưu user **trong RAM**.
+- Mỗi user được tạo bằng `User.builder()`, mật khẩu phải được **mã hóa** qua `PasswordEncoder`.
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/public/**").permitAll()
+                .requestMatchers("/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated()
+            )
+            .formLogin(form -> form.permitAll())
+            .logout(logout -> logout.permitAll());
+        return http.build();
+    }
+
+    // ===== CẤU HÌNH USER =====
+    @Bean
+    public UserDetailsManager userDetailsManager() {
+        // InMemoryUserDetailsManager — lưu trong RAM
+        return new InMemoryUserDetailsManager(
+            User.builder()
+                .username("user")
+                .password(passwordEncoder().encode("123456"))
+                .roles("USER")
+                .build(),
+
+            User.builder()
+                .username("admin")
+                .password(passwordEncoder().encode("admin123"))
+                .roles("ADMIN", "USER")
+                .build()
+        );
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+**Lưu ý:**
+- Nếu không khai báo `UserDetailsManager` mà chỉ khai báo `UserDetailsService`, Spring Security sẽ tự dùng `InMemoryUserDetailsManager`.
+- Mật khẩu **bắt buộc phải encode** — nếu để plain text sẽ bị lỗi启动.
+
+**Ưu điểm:** Nhanh, đơn giản, không cần database.
+
+**Nhược điểm:**
+- User được lưu trong RAM → **mất khi restart** ứng dụng.
+- Không phù hợp cho production với nhiều user.
+- Khó quản lý khi user có nhiều thuộc tính tùy chỉnh (email, phone, avatar...).
+
+---
+
+### C2: Custom UserDetailsService
+
+Tạo class triển khai interface `UserDetailsService` để **tải user từ database** hoặc bất kỳ nguồn nào. Đây là cách **phổ biến và mạnh mẽ nhất** trong production.
+
+**Cơ chế:**
+1. `UserDetailsService.loadUserByUsername()` được gọi bởi `DaoAuthenticationProvider`.
+2. Trong method, truy vấn database tìm user theo username.
+3. Trả về đối tượng `UserDetails` chứa thông tin: username, password (đã mã hóa), authorities.
+4. `DaoAuthenticationProvider` so sánh password gửi lên với password trong DB.
+
+#### Bước 1 — Tạo Entity User
+
+```java
+@Entity
+@Table(name = "users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(unique = true, nullable = false)
+    private String username;
+
+    @Column(nullable = false)
+    private String password;
+
+    private String email;
+    private boolean enabled = true;
+    private boolean accountNonExpired = true;
+    private boolean accountNonLocked = true;
+    private boolean credentialsNonExpired = true;
+
+    @ElementCollection(fetch = FetchType.EAGER)    // load roles ngay khi load user
+    @CollectionTable(name = "user_roles", joinColumns = @JoinColumn(name = "user_id"))
+    @Column(name = "role")
+    private Set<String> roles = new HashSet<>();
+}
+```
+
+#### Bước 2 — Tạo Repository
+
+```java
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByUsername(String username);
+}
+```
+
+#### Bước 3 — Triển khai CustomUserDetailsService
+
+```java
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String username)
+            throws UsernameNotFoundException {
+
+        // Tìm user trong database
+        User user = userRepository.findByUsername(username)
+            .orElseThrow(() ->
+                new UsernameNotFoundException("Không tìm thấy user: " + username)
+            );
+
+        // Chuyển đổi Entity User → UserDetails
+        return org.springframework.security.core.userdetails.User.builder()
+            .username(user.getUsername())
+            .password(user.getPassword())   // đã được mã hóa sẵn trong DB
+            .disabled(!user.isEnabled())
+            .accountExpired(!user.isAccountNonExpired())
+            .accountLocked(!user.isAccountNonLocked())
+            .credentialsExpired(!user.isCredentialsNonExpired())
+            .authorities(user.getRoles().toArray(new String[0]))   // ["ROLE_USER", "ROLE_ADMIN"]
+            .build();
+    }
+}
+```
+
+#### Bước 4 — Cấu hình SecurityConfig sử dụng CustomUserDetailsService
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private CustomUserDetailsService customUserDetailsService;
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/public/**").permitAll()
+                .requestMatchers("/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated()
+            )
+            .formLogin(form -> form
+                .loginPage("/login")
+                .permitAll()
+            )
+            .logout(logout -> logout.permitAll());
+        return http.build();
+    }
+
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        provider.setUserDetailsService(customUserDetailsService);
+        provider.setPasswordEncoder(passwordEncoder());
+        return provider;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+**Ưu điểm:**
+- User được lưu trong database → **persist qua restart**.
+- Dễ dàng mở rộng với nhiều user, nhiều roles.
+- Có thể tùy chỉnh đầy đủ thông tin user (email, avatar, trạng thái tài khoản...).
+- Dễ dàng kết hợp với JPA, MySQL, PostgreSQL...
+
+**Nhược điểm:**
+- Cần cài đặt database.
+- Nhiều code hơn so với C1.
+
+---
+
+### So sánh C1 vs C2
+
+| Tiêu chí | C1: SecurityConfig | C2: CustomUserDetailsService |
+|---|---|---|
+| **Nơi lưu user** | RAM (InMemory) | Database |
+| **Tồn tại sau restart** | ❌ Mất | ✅ Có |
+| **Số lượng user** | Ít (1–5) | Không giới hạn |
+| **Độ phức tạp** | Thấp | Trung bình |
+| **Phạm vi** | Dev, Test, Demo | Development → Production |
+| **Mở rộng thông tin user** | Không | Có (email, phone, avatar...) |
+| **Quản lý role** | Đơn giản | Linh hoạt |
+| **Thích hợp cho** | MVP, prototype | Ứng dụng thực tế |
+
+---
+
+### Bonus: Mã hóa password khi lưu vào Database
+
+Khi user đăng ký hoặc admin tạo user mới, cần mã hóa password trước khi lưu:
+
+```java
+@Autowired
+private PasswordEncoder passwordEncoder;
+
+// Khi tạo user mới
+public void createUser(String username, String rawPassword, Set<String> roles) {
+    User user = new User();
+    user.setUsername(username);
+    user.setPassword(passwordEncoder.encode(rawPassword));  // ← MÃ HÓA Ở ĐÂY
+    user.setRoles(roles);
+    user.setEnabled(true);
+    userRepository.save(user);
+}
+```
+
+---
+
+## Phân biệt `.roles()` và `.authorities()` trong Spring Security
+
+### Hai cách viết tương đương
+
+```java
+// Cách 1: dùng .roles() — Spring Security tự thêm prefix "ROLE_"
+User.builder()
+    .username("admin")
+    .password(passwordEncoder.encode("admin123"))
+    .roles("USER", "ADMIN")          // → Authorities: ["ROLE_USER", "ROLE_ADMIN"]
+    .build();
+
+// Cách 2: dùng .authorities() — khai báo trực tiếp, không thêm prefix
+User.builder()
+    .username("admin")
+    .password(passwordEncoder.encode("admin123"))
+    .authorities("ROLE_USER", "ROLE_ADMIN")  // → Authorities: ["ROLE_USER", "ROLE_ADMIN"]
+    .build();
+```
+
+→ **Kết quả cuối cùng hoàn toàn giống nhau.** Cả hai đều sinh ra danh sách `GrantedAuthority` là `["ROLE_USER", "ROLE_ADMIN"]`.
+
+---
+
+### Tại sao lại có `.roles()` ?
+
+Spring Security quy ước: **Role** = Authority có prefix `ROLE_`.
+
+```
+.roles("ADMIN")              →  Authority = "ROLE_ADMIN"
+.roles("USER", "ADMIN")     →  Authorities = ["ROLE_USER", "ROLE_ADMIN"]
+```
+
+Khi dùng `.roles()`, Spring Security **tự động thêm** prefix `ROLE_` vào mỗi phần tử. Đây chỉ là **shortcut** — viết nhanh hơn, không phải gõ `ROLE_` thủ công.
+
+Khi dùng `.authorities()`, bạn phải **tự thêm prefix** `ROLE_` nếu muốn nó được coi là role.
+
+---
+
+### Khi nào dùng `.roles()` ? Khi nào dùng `.authorities()` ?
+
+| Trường hợp | Nên dùng | Lý do |
+|---|---|---|
+| Khai báo role đơn giản | `.roles("ADMIN")` | Ngắn gọn, không cần nhớ prefix |
+| Khai báo permission cụ thể | `.authorities("READ", "WRITE")` | Không phải role → không có prefix `ROLE_` |
+| Role + Permission trộn lẫn | `.roles("USER").authorities("READ", "WRITE")` | Kết hợp cả hai |
+| Kiểm tra trong `hasRole()` | role = `"ADMIN"` (không có ROLE_) | `hasRole("ADMIN")` → kiểm tra `"ROLE_ADMIN"` |
+| Kiểm tra trong `hasAuthority()` | authority = `"READ"` | `hasAuthority("READ")` → kiểm tra chính xác `"READ"` |
+
+---
+
+### Ví dụ kết hợp Role + Permission
+
+```java
+// User thường: có role USER + permission đọc/ghi
+User.builder()
+    .username("user")
+    .password(passwordEncoder.encode("123456"))
+    .roles("USER")
+    .authorities("READ", "WRITE")
+    .build();
+// → Authorities: ["ROLE_USER", "READ", "WRITE"]
+
+// Admin: có role ADMIN + USER + tất cả permission
+User.builder()
+    .username("admin")
+    .password(passwordEncoder.encode("admin123"))
+    .roles("ADMIN", "USER")
+    .authorities("READ", "WRITE", "DELETE")
+    .build();
+// → Authorities: ["ROLE_ADMIN", "ROLE_USER", "READ", "WRITE", "DELETE"]
+```
+
+---
+
+### Ví dụ kiểm tra quyền trong SecurityConfig
+
+```java
+http
+    .authorizeHttpRequests(auth -> auth
+        .requestMatchers("/admin/**").hasRole("ADMIN")        // kiểm tra "ROLE_ADMIN"
+        .requestMatchers("/user/**").hasRole("USER")          // kiểm tra "ROLE_USER"
+        .requestMatchers("/api/data").hasAuthority("READ")     // kiểm tra authority "READ"
+        .requestMatchers("/api/delete").hasAuthority("DELETE")
+        .anyRequest().authenticated()
+    );
+```
+
+| Phương thức | Kiểm tra prefix `ROLE_`? | Ví dụ |
+|---|---|---|
+| `hasRole("ADMIN")` | ✅ Tự thêm `ROLE_` → so sánh `"ROLE_ADMIN"` | Chỉ dùng cho **role** |
+| `hasAuthority("READ")` | ❌ Không thêm → so sánh `"READ"` | Dùng cho **permission** |
+
+---
+
+### Tóm tắt
+
+```
+.authorities("ROLE_ADMIN")
+    = .roles("ADMIN")
+    = hasRole("ADMIN")
+    = hasAuthority("ROLE_ADMIN")
+```
+
+**Quy tắc nhớ:**
+- `hasRole()` → truyền vào **không có** `ROLE_` → Spring tự thêm.
+- `hasAuthority()` → truyền vào **đúng** giá trị authority cần kiểm tra.
+- `.roles("X")` → tự thêm `ROLE_` → sinh authority `"ROLE_X"`.
+- `.authorities("X")` → giữ nguyên → sinh authority `"X"`.
+
+---
+
+### Role và Authority — thằng nào "mạnh" hơn?
+
+**Câu trả lời ngắn: Không có thằng nào mạnh hơn.** Cả hai đều implement interface `GrantedAuthority`, hoàn toàn tương đương về mặt cơ chế kiểm tra.
+
+```java
+// Đây là cách Spring Security lưu trữ — cả role và authority đều là GrantedAuthority
+Collection<? extends GrantedAuthority> authorities = auth.getAuthorities();
+
+// Kiểm tra bằng hasRole() hay hasAuthority() đều kiểm tra cùng một danh sách
+auth.hasRole("ADMIN")       // kiểm tra trong danh sách có "ROLE_ADMIN"?
+auth.hasAuthority("ADMIN")  // kiểm tra trong danh sách có "ADMIN"?
+```
+
+**Sự khác biệt chỉ nằm ở QUY ƯỚC ĐẶT TÊN và CÁCH DÙNG:**
+
+```
+.authorities("ROLE_ADMIN")    ← authority tên là "ROLE_ADMIN"
+.hasAuthority("ROLE_ADMIN")   ← kiểm tra đúng chuỗi "ROLE_ADMIN"
+
+.roles("ADMIN")               ← sinh authority tên là "ROLE_ADMIN"
+.hasRole("ADMIN")             ← tự thêm ROLE_ → kiểm tra "ROLE_ADMIN"
+
+hasRole("ADMIN") == hasAuthority("ROLE_ADMIN")   ← cùng kiểm tra một thằng
+```
+
+**Vậy khi nào dùng cái nào cho hợp lý?**
+
+| Ngữ cảnh | Dùng | Lý do |
+|---|---|---|
+| Kiểm tra **nhóm quyền lớn** (admin, user, editor...) | `hasRole()` | Đọc dễ hiểu, quy ước chuẩn Spring |
+| Kiểm tra **quyền cụ thể** (READ, WRITE, DELETE) | `hasAuthority()` | Rõ ràng, không nhầm prefix |
+| Mở rộng bằng **Method Security** | `hasAuthority()` hoặc `hasPermission()` | Linh hoạt hơn với `@PreAuthorize` |
+
+```java
+// Ví dụ thực tế: dùng kết hợp
+@PreAuthorize("hasRole('ADMIN') or hasAuthority('MANAGE_USERS')")
+public void manageUsers() { ... }
+// → Admin luôn được phép (qua role)
+// → User thường chỉ được phép nếu có permission "MANAGE_USERS"
+```
+
+**Tóm lại:**
+- **Role** ≈ **Authority có prefix `ROLE_`** → dùng cho phân quyền **nhóm người dùng** (admin, user, manager).
+- **Authority** → dùng cho phân quyền **hành động cụ thể** (read, write, delete).
+- **Không có thằng nào mạnh hơn** — chúng cùng được lưu trong một danh sách và kiểm tra bằng cùng một cơ chế. Chỉ khác nhau ở **quy ước đặt tên** và **mức độ chi tiết**.
 
 ---
 
