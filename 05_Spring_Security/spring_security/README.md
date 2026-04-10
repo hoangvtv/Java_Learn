@@ -27,7 +27,13 @@
    - [C2: Custom UserDetailsService](#c2-custom-userdetailsservice)
    - [So sánh C1 vs C2](#so-sánh-c1-vs-c2)
    - [Bonus: Mã hóa password](#bonus-mã-hóa-password-khi-lưu-vào-database)
-7. [Phân biệt `.roles()` và `.authorities()`](#phân-biệt-roles-và-authorities-trong-spring-security)
+7. [Các mô hình phân quyền](#các-mô-hình-phân-quyền-authorization-models)
+   - [1. RBAC — Role-Based Access Control](#1-rbac--role-based-access-control-phân-quyền-theo-vai-trò)
+   - [2. ABAC — Attribute-Based Access Control](#2-abac--attribute-based-access-control-phân-quyền-theo-thuộc-tính)
+   - [3. DAC — Discretionary Access Control](#3-dac--discretionary-access-control-phân-quyền-tự-do)
+   - [4. MAC — Mandatory Access Control](#4-mac--mandatory-access-control-phân-quyền-bắt-buộc)
+   - [So sánh 4 mô hình](#so-sánh-4-mô-hình-phân-quyền)
+   - [Kết hợp RBAC + ABAC](#kết-hợp-rbac--abac-trong-spring-security-thực-tế-nhất)
 8. [Bảng tổng hợp màu sắc sơ đồ](#bảng-tổng-hợp-màu-sắc-sơ-đồ)
 
 ---
@@ -1081,6 +1087,351 @@ public void manageUsers() { ... }
 - **Role** ≈ **Authority có prefix `ROLE_`** → dùng cho phân quyền **nhóm người dùng** (admin, user, manager).
 - **Authority** → dùng cho phân quyền **hành động cụ thể** (read, write, delete).
 - **Không có thằng nào mạnh hơn** — chúng cùng được lưu trong một danh sách và kiểm tra bằng cùng một cơ chế. Chỉ khác nhau ở **quy ước đặt tên** và **mức độ chi tiết**.
+
+---
+
+## Các mô hình phân quyền (Authorization Models)
+
+Khi nói đến **xác minh quyền** (authorization), có 4 mô hình phổ biến: **RBAC, ABAC, DAC, MAC**. Spring Security hỗ trợ tất cả.
+
+---
+
+### 1. RBAC — Role-Based Access Control (Phân quyền theo vai trò)
+
+**Khái niệm:** Người dùng được gán **vai trò (role)**, vai trò quyết định quyền truy cập. Không cần gán quyền trực tiếp cho từng user.
+
+```
+User  ──belongs to──▶  Role  ──grants──▶  Permission
+                        ▲
+                        │
+                   User  ──belongs to──▶  Role
+```
+
+**Ví dụ thực tế:**
+- **Admin** → toàn quyền (đọc, ghi, xóa, quản lý user)
+- **Editor** → đọc, ghi bài viết
+- **Viewer** → chỉ đọc
+
+**Trong Spring Security:**
+
+```java
+// Cấu hình RBAC
+@Bean
+public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/admin/**").hasRole("ADMIN")
+            .requestMatchers("/editor/**").hasAnyRole("ADMIN", "EDITOR")
+            .requestMatchers("/user/**").hasRole("USER")
+            .anyRequest().authenticated()
+        );
+    return http.build();
+}
+
+// Gán role cho user
+@Bean
+public UserDetailsService userDetailsService() {
+    return new InMemoryUserDetailsManager(
+        User.builder()
+            .username("admin")
+            .password(passwordEncoder.encode("123"))
+            .roles("ADMIN")
+            .build(),
+        User.builder()
+            .username("editor")
+            .password(passwordEncoder.encode("123"))
+            .roles("EDITOR")
+            .build(),
+        User.builder()
+            .username("viewer")
+            .password(passwordEncoder.encode("123"))
+            .roles("VIEWER")
+            .build()
+    );
+}
+```
+
+**Ưu điểm:**
+- Đơn giản, dễ quản lý
+- Phù hợp hầu hết ứng dụng
+- Dễ kiểm toán (audit)
+
+**Nhược điểm:**
+- Không linh hoạt khi cần phân quyền theo **ngữ cảnh** (thời gian, địa điểm...)
+- Không hỗ trợ quyền theo **resource cụ thể**
+
+---
+
+### 2. ABAC — Attribute-Based Access Control (Phân quyền theo thuộc tính)
+
+**Khái niệm:** Quyền truy cập được quyết định dựa trên **nhiều thuộc tính** của user, resource, và ngữ cảnh — không chỉ riêng vai trò.
+
+```
+Quyền truy cập = f(
+    user attributes  (age, department, location, time),
+    resource attributes (owner, sensitivity, type),
+    environment attributes (IP, time, device)
+)
+```
+
+**Ví dụ thực tế:**
+- "Chỉ manager mới được duyệt chi phí > 10 triệu"
+- "User chỉ được sửa bài viết **của chính mình**"
+- "Không cho phép truy cập sau 22:00"
+
+**Trong Spring Security — dùng `@PreAuthorize`:**
+
+```java
+// Kích hoạt Method Security
+@EnableMethodSecurity
+@Configuration
+public class SecurityConfig { ... }
+```
+
+```java
+@Service
+public class ExpenseService {
+
+    // Ví dụ ABAC: chỉ manager mới được duyệt chi phí > 10 triệu
+    @PreAuthorize("@expenseService.canApprove(#amount, authentication)")
+    public void approveExpense(double amount) {
+        // ...
+    }
+
+    // Kiểm tra nhiều thuộc tính cùng lúc
+    @PreAuthorize("hasRole('EDITOR') and " +
+                  "(#post.author == authentication.name or hasRole('ADMIN'))")
+    public void editPost(Post post) {
+        // Editor chỉ sửa được bài của mình; Admin sửa được mọi bài
+    }
+
+    // ABAC với điều kiện thời gian
+    @PreAuthorize("hasRole('EMPLOYEE') and " +
+                  "T(java.time.LocalTime).now().isBefore(T(java.time.LocalTime).of(22, 0))")
+    public void accessLateShiftResource() {
+        // Chỉ cho phép trước 22:00
+    }
+}
+```
+
+**Cấu hình SpEL phức tạp hơn với `@PostAuthorize`:**
+
+```java
+@PostAuthorize("returnObject.owner == authentication.name or hasRole('ADMIN')")
+public Document getDocument(Long id) {
+    // Lấy document, sau đó kiểm tra — user chỉ thấy document của mình
+    return documentRepository.findById(id).orElseThrow();
+}
+```
+
+**So sánh:**
+- `@PreAuthorize` — kiểm tra **TRƯỚC KHI** thực thi method
+- `@PostAuthorize` — kiểm tra **SAU KHI** method trả kết quả (dùng `returnObject`)
+
+**Ưu điểm:**
+- Linh hoạt, chi tiết
+- Hỗ trợ ngữ cảnh (thời gian, vị trí, resource cụ thể)
+- Mạnh mẽ cho enterprise
+
+**Nhược điểm:**
+- Phức tạp hơn RBAC
+- Cần hiểu SpEL (Spring Expression Language)
+- Khó kiểm toán khi rules phức tạp
+
+---
+
+### 3. DAC — Discretionary Access Control (Phân quyền tự do)
+
+**Khái niệm:** Chủ sở hữu resource có thể **tự quyết định** ai được truy cập resource đó. Không có authority trung tâm.
+
+```
+Ví dụ: Google Drive
+  - File của tôi → tôi có thể share cho ai tôi muốn
+  - Tôi là owner → tôi quyết ai được đọc, ai được ghi
+```
+
+**Trong Spring Security:**
+
+```java
+// Mô phỏng DAC: kiểm tra chủ sở hữu resource
+@PreAuthorize("hasRole('USER')")
+public class DocumentService {
+
+    @Autowired
+    private DocumentRepository documentRepository;
+
+    // User chỉ được cập nhật document CỦA MÌNH
+    @PreAuthorize("@documentService.isOwner(#docId, authentication.name)")
+    public void updateDocument(Long docId, String content) {
+        Document doc = documentRepository.findById(docId)
+            .orElseThrow(() -> new AccessDeniedException("Không có quyền"));
+        doc.setContent(content);
+        documentRepository.save(doc);
+    }
+
+    // User có thể share document cho người khác
+    public void shareDocument(Long docId, String targetUsername, String role) {
+        Document doc = documentRepository.findById(docId)
+            .orElseThrow(() -> new NotFoundException("Không tìm thấy"));
+
+        // Chỉ owner mới được share
+        if (!doc.getOwner().equals(SecurityContextHolder.getContext()
+                .getAuthentication().getName())) {
+            throw new AccessDeniedException("Chỉ owner mới được share");
+        }
+
+        documentAccessRepository.save(new DocumentAccess(docId, targetUsername, role));
+    }
+}
+```
+
+**Entity mô phỏng bảng phân quyền DAC:**
+
+```java
+@Entity
+public class DocumentAccess {
+    @Id
+    @GeneratedValue
+    private Long id;
+
+    @Column(name = "document_id")
+    private Long documentId;
+
+    @Column(name = "grantee_username")
+    private String granteeUsername;  // người được chia sẻ
+
+    private String accessLevel;      // READ, WRITE, ADMIN
+    private LocalDateTime grantedAt;
+}
+```
+
+**Ưu điểm:**
+- Linh hoạt cho người dùng cuối
+- Phù hợp ứng dụng cộng tác (Google Drive, Notion, Dropbox...)
+
+**Nhược điểm:**
+- Khó kiểm soát tập trung
+- Rủi ro bảo mật nếu user share quá rộng
+- Khó audit
+
+---
+
+### 4. MAC — Mandatory Access Control (Phân quyền bắt buộc)
+
+**Khái niệm:** Quyền truy cập được **quy định bắt buộc** bởi hệ thống/quản trị viên. User không thể tự thay đổi quyền của mình.
+
+```
+Ví dụ:
+  - Hệ thống quân sự: "Bí mật" chỉ đọc được bởi cấp "Bí mật" trở lên
+  - SELinux (Linux): kernel quyết định tất cả
+  -隔 (隔)隔 (隔)
+```
+
+**Trong Spring Security:**
+
+```java
+// MAC: quyền do hệ thống/quản trị viên kiểm soát hoàn toàn
+// User không thể tự ý thay đổi quyền của mình
+
+@Configuration
+@EnableMethodSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                // MAC: mọi quyền được kiểm tra cứng — không có user nào tự ý sửa
+                .requestMatchers("/classified/**").hasAuthority("CLEARANCE_LEVEL_3")
+                .requestMatchers("/secret/**").hasAuthority("CLEARANCE_LEVEL_2")
+                .requestMatchers("/topsecret/**").hasAuthority("CLEARANCE_LEVEL_1")
+                .anyRequest().authenticated()
+            );
+        return http.build();
+    }
+}
+```
+
+**Kiểm tra clearance cấp độ (MAC):**
+
+```java
+@Service
+public class ClearanceService {
+
+    public boolean hasClearanceLevel(Authentication auth, int requiredLevel) {
+        // Security Officer (quản trị viên) gán clearance cứng — user không thể tự ý thay đổi
+        return auth.getAuthorities().stream()
+            .map(GrantedAuthority::getAuthority)
+            .filter(a -> a.startsWith("CLEARANCE_LEVEL_"))
+            .map(a -> Integer.parseInt(a.replace("CLEARANCE_LEVEL_", "")))
+            .anyMatch(level -> level <= requiredLevel);  // cấp càng thấp → quyền càng cao
+    }
+}
+
+@PreAuthorize("@clearanceService.hasClearanceLevel(authentication, 2)")
+public void accessSecretDocument() {
+    // Chỉ clearance cấp 2 (CLEARANCE_LEVEL_2) trở xuống mới được vào
+}
+```
+
+**Ưu điểm:**
+- Bảo mật cao nhất
+- Kiểm soát tập trung hoàn toàn
+- Phù hợp quân sự, chính phủ, tài chính
+
+**Nhược điểm:**
+- Ít linh hoạt
+- Phức tạp trong triển khai
+
+---
+
+### So sánh 4 mô hình phân quyền
+
+| Tiêu chí | RBAC | ABAC | DAC | MAC |
+|---|---|---|---|---|
+| **Quyết định quyền** | Vai trò | Nhiều thuộc tính | Chủ sở hữu resource | Hệ thống/quản trị |
+| **Linh hoạt** | Trung bình | Cao | Rất cao | Thấp |
+| **Độ phức tạp** | Thấp | Cao | Trung bình | Cao |
+| **Dễ kiểm toán** | Dễ | Khó | Trung bình | Rất dễ |
+| **Phù hợp** | Ứng dụng thông thường | Enterprise, SaaS | Ứng dụng cộng tác | Quân sự, chính phủ |
+| **Ví dụ** | Admin / User / Editor | "Chỉ manager > 10M" | Google Drive, Dropbox | SELinux, military |
+
+---
+
+### Kết hợp RBAC + ABAC trong Spring Security (thực tế nhất)
+
+Đa số ứng dụng thực tế dùng **RBAC làm nền tảng + ABAC bổ sung** cho ngữ cảnh:
+
+```java
+@Bean
+public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        // ===== RBAC: phân quyền theo vai trò =====
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/admin/**").hasRole("ADMIN")
+            .requestMatchers("/manager/**").hasAnyRole("ADMIN", "MANAGER")
+            .requestMatchers("/user/**").hasRole("USER")
+            .requestMatchers("/public/**").permitAll()
+            .anyRequest().authenticated()
+        )
+        // ===== ABAC: kiểm tra ngữ cảnh =====
+        .formLogin(form -> form.permitAll());
+    return http.build();
+}
+```
+
+```java
+@EnableMethodSecurity
+public class AppConfig { }
+
+// Trong service
+@PreAuthorize("hasRole('USER') and " +
+              "(#resource.owner == authentication.name or hasRole('ADMIN'))")
+public void modifyResource(Resource resource) {
+    // RBAC: user mới được vào đây
+    // ABAC: chỉ owner hoặc admin mới được sửa resource cụ thể này
+}
+```
 
 ---
 
